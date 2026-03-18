@@ -743,6 +743,13 @@ function App() {
   const [viewCust,setViewCust]=useState(null);
   const [confirmDel,setConfirmDel]=useState(null);
   const [settingsEdit,setSettingsEdit]=useState(null);
+  // ── Edit modals ──────────────────────────────────────────────
+  const [editSale,setEditSale]=useState(null);
+  const [editProduct,setEditProduct]=useState(null);
+  const [editCustomer,setEditCustomer]=useState(null);
+  const [editExpense,setEditExpense]=useState(null);
+  const [editCredit,setEditCredit]=useState(null);
+  const [bulkDelConfirm,setBulkDelConfirm]=useState(null); // {label,action}
   // historical entry state
   const [histSalesDate,setHistSalesDate]=useState(today());
   const [histSalesLines,setHistSalesLines]=useState([{productId:"",qty:1,sellingType:"retail",paymentMode:"cash",customerId:"",soldPrice:""}]);
@@ -1020,6 +1027,76 @@ function App() {
   }
   async function addUser(){if(!uForm.name||!uForm.username||!uForm.password)return;if(users.some(u=>u.username===uForm.username))return notify("Username taken","err");const u={id:Date.now(),...uForm,signature:uForm.signature||uForm.name};await dbPut("users",u);setUsers(prev=>[u,...prev]);setUForm({name:"",username:"",password:"",role:"employee",signature:""});notify("User created");}
   async function saveSettings(){await dbPut("settings",settingsEdit);setSettings(settingsEdit);setSettingsEdit(null);notify("Settings saved");}
+
+  // ── EDIT FUNCTIONS ──────────────────────────────────────────
+  async function saveEditSale(s){
+    await dbPut("sales",s);setSales(prev=>prev.map(x=>x.id===s.id?s:x));setEditSale(null);notify("Sale updated");
+  }
+  async function deleteSale(id){
+    await dbDelete("sales",id);setSales(prev=>prev.filter(x=>x.id!==id));setEditSale(null);notify("Sale deleted");
+  }
+  async function saveEditProduct(p){
+    await dbPut("products",p);setProducts(prev=>prev.map(x=>x.id===p.id?p:x));setEditProduct(null);notify("Product updated");
+  }
+  async function saveEditCustomer(c){
+    await dbPut("customers",c);setCustomers(prev=>prev.map(x=>x.id===c.id?c:x));setEditCustomer(null);notify("Customer updated");
+  }
+  async function deleteCustomer(id){
+    await dbDelete("customers",id);setCustomers(prev=>prev.filter(x=>x.id!==id));setEditCustomer(null);notify("Customer deleted");
+  }
+  async function saveEditExpense(e){
+    await dbPut("expenses",e);setExpenses(prev=>prev.map(x=>x.id===e.id?e:x));setEditExpense(null);notify("Expense updated");
+  }
+  async function saveEditCredit(c){
+    await dbPut("credits",c);setCredits(prev=>prev.map(x=>x.id===c.id?c:x));setEditCredit(null);notify("Winga record updated");
+  }
+  async function deleteCredit(id){
+    await dbDelete("credits",id);setCredits(prev=>prev.filter(x=>x.id!==id));setEditCredit(null);notify("Winga record deleted");
+  }
+
+  // ── BULK DELETE FUNCTIONS ───────────────────────────────────
+  async function bulkDeleteSales(filter){
+    let toDelete;
+    if(filter==="all") toDelete=sales.map(s=>s.id);
+    else if(filter==="historical") toDelete=sales.filter(s=>s.isHistorical).map(s=>s.id);
+    else if(filter==="today") toDelete=sales.filter(s=>sameDay(s.createdAt)).map(s=>s.id);
+    else if(typeof filter==="string"&&filter.match(/^\d{4}-\d{2}$/)){
+      toDelete=sales.filter(s=>s.createdAt.slice(0,7)===filter).map(s=>s.id);
+    } else toDelete=[];
+    for(const id of toDelete) await dbDelete("sales",id);
+    setSales(prev=>prev.filter(s=>!toDelete.includes(s.id)));
+    notify(`✅ ${toDelete.length} sale(s) deleted`);
+  }
+  async function bulkDeleteExpenses(filter){
+    let toDelete;
+    if(filter==="all") toDelete=expenses.map(e=>e.id);
+    else if(filter==="month"){const m=new Date().toISOString().slice(0,7);toDelete=expenses.filter(e=>e.date.slice(0,7)===m).map(e=>e.id);}
+    else toDelete=[];
+    for(const id of toDelete) await dbDelete("expenses",id);
+    setExpenses(prev=>prev.filter(e=>!toDelete.includes(e.id)));
+    notify(`✅ ${toDelete.length} expense(s) deleted`);
+  }
+  async function bulkDeleteCustomers(){
+    const noDebt=customers.filter(c=>!(c.creditBalance>0));
+    for(const c of noDebt) await dbDelete("customers",c.id);
+    setCustomers(prev=>prev.filter(c=>c.creditBalance>0));
+    notify(`✅ ${noDebt.length} customer(s) deleted (kept those with balance)`);
+  }
+  async function bulkDeleteAllCustomers(){
+    await dbClear("customers");setCustomers([]);notify("✅ All customers deleted");
+  }
+  async function bulkDeletePurchases(){
+    await dbClear("purchases");setPurchases([]);notify("✅ All purchase records deleted");
+  }
+  async function bulkDeleteCredits(filter){
+    let toDelete;
+    if(filter==="all") toDelete=credits.map(c=>c.id);
+    else if(filter==="settled") toDelete=credits.filter(c=>c.balance===0||(c.totalDue-(c.paidAmount||0))<=0).map(c=>c.id);
+    else toDelete=[];
+    for(const id of toDelete) await dbDelete("credits",id);
+    setCredits(prev=>prev.filter(c=>!toDelete.includes(c.id)));
+    notify(`✅ ${toDelete.length} Winga record(s) deleted`);
+  }
 
   // CSV exports
   const csvDl=(rows,name)=>dlFile(rows.map(r=>r.map(c=>JSON.stringify(c??"")||'""').join(",")).join("\n"),name,"text/csv");
@@ -1391,6 +1468,7 @@ function App() {
                   <Td cls="font-semibold">{p.stock}</Td>
                   <Td>{p.stock<=p.reorderLevel?<Bdg cls="bg-red-100 text-red-700">Low</Bdg>:<Bdg cls="bg-emerald-100 text-emerald-700">OK</Bdg>}</Td>
                   {isAdmin&&<Td><button className="text-red-400 hover:text-red-600" onClick={()=>setConfirmDel({type:"product",id:p.id})}>🗑</button></Td>}
+                  {isAdmin&&<Td><button className="text-blue-400 hover:text-blue-600" onClick={()=>setEditProduct({...p})}>✏️</button></Td>}
                 </tr>
               ))}</tbody>
             </Tbl>
@@ -1418,7 +1496,7 @@ function App() {
             <CT>Recent Sales</CT>
             {isAdmin&&<div className="flex gap-2"><Btn v="success" onClick={()=>xlsxExportSales(salesD,"all")}>⬇ XLSX</Btn><Btn v="outline" onClick={()=>expCSV("all")}>⬇ CSV</Btn></div>}
           </div></CH><CC>
-            <Tbl><thead><tr><Th>Time</Th><Th>Item</Th><Th>Customer</Th><Th>Qty</Th><Th>Type</Th><Th>Payment</Th><Th>By</Th><Th>Total</Th></tr></thead>
+            <Tbl><thead><tr><Th>Time</Th><Th>Item</Th><Th>Customer</Th><Th>Qty</Th><Th>Type</Th><Th>Payment</Th><Th>By</Th><Th>Total</Th>{isAdmin&&<Th></Th>}</tr></thead>
               <tbody>{salesD.slice(0,25).map(s=>(
                 <tr key={s.id}>
                   <Td cls="text-slate-400">{dtm(s.createdAt)}{s.isHistorical&&<Bdg cls="ml-1 bg-indigo-100 text-indigo-600">hist</Bdg>}</Td><Td>{s.productName}</Td>
@@ -1426,8 +1504,9 @@ function App() {
                   <Td cls="capitalize">{s.sellingType}</Td>
                   <Td><Bdg cls={s.paymentMode==="credit"?"bg-red-100 text-red-700":s.paymentMode==="transfer"?"bg-blue-100 text-blue-700":"bg-emerald-100 text-emerald-700"}>{s.paymentMode}</Bdg></Td>
                   <Td cls="text-slate-400">{s.staffName}</Td><Td cls="font-semibold">{cur(s.total)}</Td>
+                  {isAdmin&&<Td><button className="text-blue-400 hover:text-blue-600 mr-2" onClick={()=>setEditSale({...sales.find(x=>x.id===s.id)})}>✏️</button><button className="text-red-400 hover:text-red-600" onClick={()=>setConfirmDel({type:"sale",id:s.id})}>🗑</button></Td>}
                 </tr>
-              ))}{!salesD.length&&<tr><Td cls="text-center text-slate-400 py-8" colSpan={8}>No sales recorded</Td></tr>}
+              ))}{!salesD.length&&<tr><Td cls="text-center text-slate-400 py-8" colSpan={isAdmin?9:8}>No sales recorded</Td></tr>}
               </tbody>
             </Tbl>
           </CC></Card>
@@ -1473,6 +1552,8 @@ function App() {
                       <Bdg cls={cr.balance>0?"bg-amber-600 text-white":"bg-blue-600 text-white"}>Bal {cur(cr.balance)}</Bdg>
                       <Btn v="outline" onClick={()=>setPrintRpt(cr)}>View</Btn>
                       <Btn onClick={()=>printReport(cr)}>🖨 Print</Btn>
+                      {isAdmin&&<Btn v="ghost" cls="text-blue-500" onClick={()=>setEditCredit({...credits.find(x=>x.id===cr.id)})}>✏️ Edit</Btn>}
+                      {isAdmin&&<Btn v="ghost" cls="text-red-400" onClick={()=>setConfirmDel({type:"credit",id:cr.id})}>🗑</Btn>}
                     </div>
                   </div>
                 </div>;
@@ -1522,7 +1603,10 @@ function App() {
                   <Td cls="font-medium">{c.name}</Td><Td>{c.phone}</Td><Td>{c.area||"—"}</Td>
                   <Td>{(c.creditBalance||0)>0?<Bdg cls="bg-red-100 text-red-700">{cur(c.creditBalance)}</Bdg>:<Bdg cls="bg-emerald-100 text-emerald-700">Clear</Bdg>}</Td>
                   <Td cls="text-slate-400">{donly(c.createdAt)}</Td>
-                  <Td><Btn v="ghost" onClick={()=>setViewCust(c)} cls="text-xs">History</Btn></Td>
+                  <Td>
+                    <Btn v="ghost" onClick={()=>setViewCust(c)} cls="text-xs mr-1">History</Btn>
+                    {isAdmin&&<Btn v="ghost" onClick={()=>setEditCustomer({...c})} cls="text-xs text-blue-500">✏️ Edit</Btn>}
+                  </Td>
                 </tr>
               ))}{!customers.length&&<tr><Td cls="text-center text-slate-400 py-8" colSpan={6}>No customers</Td></tr>}
               </tbody>
@@ -1579,7 +1663,10 @@ function App() {
                   <Td cls="font-semibold text-red-600">{cur(e.amount)}</Td>
                   <Td>{e.description||"—"}</Td>
                   <Td cls="text-slate-400">{u?.name||"—"}</Td>
-                  {isAdmin&&<Td><button className="text-red-400 hover:text-red-600" onClick={()=>setConfirmDel({type:"expense",id:e.id})}>🗑</button></Td>}
+                  {isAdmin&&<Td>
+                    <button className="text-blue-400 hover:text-blue-600 mr-2" onClick={()=>setEditExpense({...e})}>✏️</button>
+                    <button className="text-red-400 hover:text-red-600" onClick={()=>setConfirmDel({type:"expense",id:e.id})}>🗑</button>
+                  </Td>}
                 </tr>;
               })}{!expenses.length&&<tr><Td cls="text-center text-slate-400 py-8" colSpan={6}>No expenses</Td></tr>}
               </tbody>
@@ -2176,6 +2263,57 @@ function App() {
               </ol>
             </div>
           </CC></Card>
+
+          {/* ── BULK DELETE ── */}
+          <Card><CH><div className="flex items-center gap-2"><span className="text-base">🗑</span><CT>Data Management — Bulk Delete (Admin Only)</CT></div></CH><CC>
+            <p className="text-xs text-red-500 font-medium mb-4">⚠️ Bulk delete actions are permanent and cannot be undone. Export a backup first!</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+              {/* Sales */}
+              <div className="rounded-2xl border border-red-100 p-4 space-y-2">
+                <p className="font-semibold text-sm">🛒 Sales Records</p>
+                <p className="text-xs text-slate-400">{sales.length} total records</p>
+                <div className="space-y-1.5">
+                  <Btn v="destructive" cls="w-full text-xs" onClick={()=>setBulkDelConfirm({label:"Delete ALL sales records",action:()=>bulkDeleteSales("all")})}>🗑 Delete All Sales</Btn>
+                  <Btn v="outline" cls="w-full text-xs text-red-500 border-red-200" onClick={()=>setBulkDelConfirm({label:"Delete all HISTORICAL (past entry) sales",action:()=>bulkDeleteSales("historical")})}>🗑 Delete Historical Sales Only</Btn>
+                  <Btn v="outline" cls="w-full text-xs text-red-500 border-red-200" onClick={()=>setBulkDelConfirm({label:"Delete today's sales",action:()=>bulkDeleteSales("today")})}>🗑 Delete Today's Sales</Btn>
+                </div>
+              </div>
+              {/* Expenses */}
+              <div className="rounded-2xl border border-red-100 p-4 space-y-2">
+                <p className="font-semibold text-sm">💸 Expenses</p>
+                <p className="text-xs text-slate-400">{expenses.length} total records</p>
+                <div className="space-y-1.5">
+                  <Btn v="destructive" cls="w-full text-xs" onClick={()=>setBulkDelConfirm({label:"Delete ALL expense records",action:()=>bulkDeleteExpenses("all")})}>🗑 Delete All Expenses</Btn>
+                  <Btn v="outline" cls="w-full text-xs text-red-500 border-red-200" onClick={()=>setBulkDelConfirm({label:"Delete this month's expenses",action:()=>bulkDeleteExpenses("month")})}>🗑 Delete This Month Only</Btn>
+                </div>
+              </div>
+              {/* Customers */}
+              <div className="rounded-2xl border border-red-100 p-4 space-y-2">
+                <p className="font-semibold text-sm">👥 Customers</p>
+                <p className="text-xs text-slate-400">{customers.length} total · {customers.filter(c=>c.creditBalance>0).length} with balance</p>
+                <div className="space-y-1.5">
+                  <Btn v="destructive" cls="w-full text-xs" onClick={()=>setBulkDelConfirm({label:"Delete ALL customers (including those with debt)",action:bulkDeleteAllCustomers})}>🗑 Delete All Customers</Btn>
+                  <Btn v="outline" cls="w-full text-xs text-red-500 border-red-200" onClick={()=>setBulkDelConfirm({label:"Delete customers with zero balance (keep debtors)",action:bulkDeleteCustomers})}>🗑 Delete Cleared Customers</Btn>
+                </div>
+              </div>
+              {/* Winga */}
+              <div className="rounded-2xl border border-red-100 p-4 space-y-2">
+                <p className="font-semibold text-sm">🤝 Winga Credits</p>
+                <p className="text-xs text-slate-400">{credits.length} total records</p>
+                <div className="space-y-1.5">
+                  <Btn v="destructive" cls="w-full text-xs" onClick={()=>setBulkDelConfirm({label:"Delete ALL Winga settlement records",action:()=>bulkDeleteCredits("all")})}>🗑 Delete All Winga Records</Btn>
+                  <Btn v="outline" cls="w-full text-xs text-red-500 border-red-200" onClick={()=>setBulkDelConfirm({label:"Delete settled (fully paid) Winga records",action:()=>bulkDeleteCredits("settled")})}>🗑 Delete Settled Only</Btn>
+                </div>
+              </div>
+              {/* Purchases */}
+              <div className="rounded-2xl border border-red-100 p-4 space-y-2">
+                <p className="font-semibold text-sm">🚚 Restocking History</p>
+                <p className="text-xs text-slate-400">{purchases.length} total records</p>
+                <Btn v="destructive" cls="w-full text-xs" onClick={()=>setBulkDelConfirm({label:"Delete ALL purchase/restocking records",action:bulkDeletePurchases})}>🗑 Delete All Purchases</Btn>
+                <p className="text-xs text-slate-400">Note: Deleting purchase history does not change current stock levels.</p>
+              </div>
+            </div>
+          </CC></Card>
         </div>}
 
         {/* ── USERS ── */}
@@ -2225,12 +2363,140 @@ function App() {
         </div>}
       </main>
 
+      {/* ── EDIT SALE MODAL ── */}
+      {editSale&&<Modal open={!!editSale} onClose={()=>setEditSale(null)} title="Edit Sale" wide>
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+          <div><Lbl>Product</Lbl>
+            <Sel value={String(editSale.productId)} onChange={v=>setEditSale({...editSale,productId:Number(v)})}>
+              {products.map(p=><option key={p.id} value={String(p.id)}>{p.name}</option>)}
+            </Sel>
+          </div>
+          <div><Lbl>Quantity</Lbl><Inp type="number" min="1" value={editSale.qty} onChange={e=>setEditSale({...editSale,qty:Number(e.target.value)})}/></div>
+          <div><Lbl>Sale Type</Lbl>
+            <Sel value={editSale.sellingType} onChange={v=>setEditSale({...editSale,sellingType:v})}>
+              <option value="retail">Retail</option><option value="wholesale">Wholesale</option>
+            </Sel>
+          </div>
+          <div><Lbl>Payment Mode</Lbl>
+            <Sel value={editSale.paymentMode} onChange={v=>setEditSale({...editSale,paymentMode:v})}>
+              <option value="cash">Cash</option><option value="transfer">Transfer</option><option value="credit">Credit</option>
+            </Sel>
+          </div>
+          <div><Lbl>Custom Sold Price (leave 0 for standard)</Lbl>
+            <Inp type="number" value={editSale.soldPrice||""} placeholder="0 = use standard price" onChange={e=>setEditSale({...editSale,soldPrice:e.target.value?Number(e.target.value):null})}/>
+          </div>
+          <div><Lbl>Customer</Lbl>
+            <Sel value={String(editSale.customerId||"")} onChange={v=>setEditSale({...editSale,customerId:v?Number(v):null})} ph="Walk-in">
+              {customers.map(c=><option key={c.id} value={String(c.id)}>{c.name}</option>)}
+            </Sel>
+          </div>
+          <div><Lbl>Date</Lbl>
+            <Inp type="date" value={editSale.createdAt?.slice(0,10)||today()} onChange={e=>setEditSale({...editSale,createdAt:e.target.value+"T12:00:00.000Z"})}/>
+          </div>
+        </div>
+        {(()=>{const p=products.find(x=>x.id===editSale.productId);const std=p?getPrice(p,editSale.sellingType):0;const sp=editSale.soldPrice&&editSale.soldPrice>0?editSale.soldPrice:std;const profit=(sp-(p?.costPrice||0))*editSale.qty;return p&&<div className="mt-3 rounded-xl bg-slate-50 p-3 text-xs flex gap-5"><span>Standard: <b>{cur(std)}</b></span><span>Sold: <b>{cur(sp)}</b></span><span>Total: <b>{cur(sp*editSale.qty)}</b></span><span>Profit: <b className={profit>=0?"text-emerald-700":"text-red-600"}>{cur(profit)}</b></span></div>})()}
+        <div className="flex gap-2 mt-4 justify-between">
+          <Btn v="destructive" onClick={()=>{setConfirmDel({type:"sale",id:editSale.id});setEditSale(null);}}>🗑 Delete Sale</Btn>
+          <div className="flex gap-2"><Btn v="outline" onClick={()=>setEditSale(null)}>Cancel</Btn><Btn v="success" onClick={()=>saveEditSale(editSale)}>✅ Save Changes</Btn></div>
+        </div>
+      </Modal>}
+
+      {/* ── EDIT PRODUCT MODAL ── */}
+      {editProduct&&<Modal open={!!editProduct} onClose={()=>setEditProduct(null)} title="Edit Product">
+        <div className="grid grid-cols-2 gap-3">
+          <div className="col-span-2"><Lbl>Name</Lbl><Inp value={editProduct.name} onChange={e=>setEditProduct({...editProduct,name:e.target.value})}/></div>
+          <div><Lbl>Category</Lbl><Sel value={editProduct.category} onChange={v=>setEditProduct({...editProduct,category:v})}>{CATEGORIES.map(c=><option key={c} value={c}>{c}</option>)}</Sel></div>
+          <div><Lbl>Stock</Lbl><Inp type="number" value={editProduct.stock} onChange={e=>setEditProduct({...editProduct,stock:Number(e.target.value)})}/></div>
+          <div><Lbl>Retail Price</Lbl><Inp type="number" value={editProduct.retailPrice} onChange={e=>setEditProduct({...editProduct,retailPrice:Number(e.target.value)})}/></div>
+          <div><Lbl>Wholesale Price</Lbl><Inp type="number" value={editProduct.wholesalePrice} onChange={e=>setEditProduct({...editProduct,wholesalePrice:Number(e.target.value)})}/></div>
+          <div><Lbl>Cost Price</Lbl><Inp type="number" value={editProduct.costPrice} onChange={e=>setEditProduct({...editProduct,costPrice:Number(e.target.value)})}/></div>
+          <div><Lbl>Reorder Level</Lbl><Inp type="number" value={editProduct.reorderLevel} onChange={e=>setEditProduct({...editProduct,reorderLevel:Number(e.target.value)})}/></div>
+        </div>
+        <div className="flex gap-2 mt-4 justify-between">
+          <Btn v="destructive" onClick={()=>{setConfirmDel({type:"product",id:editProduct.id});setEditProduct(null);}}>🗑 Delete Product</Btn>
+          <div className="flex gap-2"><Btn v="outline" onClick={()=>setEditProduct(null)}>Cancel</Btn><Btn v="success" onClick={()=>saveEditProduct(editProduct)}>✅ Save Changes</Btn></div>
+        </div>
+      </Modal>}
+
+      {/* ── EDIT CUSTOMER MODAL ── */}
+      {editCustomer&&<Modal open={!!editCustomer} onClose={()=>setEditCustomer(null)} title="Edit Customer">
+        <div className="grid grid-cols-2 gap-3">
+          <div><Lbl>Name</Lbl><Inp value={editCustomer.name} onChange={e=>setEditCustomer({...editCustomer,name:e.target.value})}/></div>
+          <div><Lbl>Phone</Lbl><Inp value={editCustomer.phone||""} onChange={e=>setEditCustomer({...editCustomer,phone:e.target.value})}/></div>
+          <div><Lbl>Area</Lbl><Inp value={editCustomer.area||""} onChange={e=>setEditCustomer({...editCustomer,area:e.target.value})}/></div>
+          <div><Lbl>Email</Lbl><Inp value={editCustomer.email||""} onChange={e=>setEditCustomer({...editCustomer,email:e.target.value})}/></div>
+          <div><Lbl>Credit Balance (TZS)</Lbl><Inp type="number" value={editCustomer.creditBalance||0} onChange={e=>setEditCustomer({...editCustomer,creditBalance:Number(e.target.value)})}/></div>
+          <div className="col-span-2"><Lbl>Notes</Lbl><Txta value={editCustomer.notes||""} onChange={e=>setEditCustomer({...editCustomer,notes:e.target.value})}/></div>
+        </div>
+        <div className="flex gap-2 mt-4 justify-between">
+          <Btn v="destructive" onClick={()=>setBulkDelConfirm({label:`Delete customer "${editCustomer.name}" permanently?`,action:()=>deleteCustomer(editCustomer.id)})}>🗑 Delete Customer</Btn>
+          <div className="flex gap-2"><Btn v="outline" onClick={()=>setEditCustomer(null)}>Cancel</Btn><Btn v="success" onClick={()=>saveEditCustomer(editCustomer)}>✅ Save Changes</Btn></div>
+        </div>
+      </Modal>}
+
+      {/* ── EDIT EXPENSE MODAL ── */}
+      {editExpense&&<Modal open={!!editExpense} onClose={()=>setEditExpense(null)} title="Edit Expense">
+        <div className="grid grid-cols-2 gap-3">
+          <div><Lbl>Category</Lbl><Sel value={editExpense.category} onChange={v=>setEditExpense({...editExpense,category:v})}>{EXP_CATS.map(c=><option key={c} value={c}>{c}</option>)}</Sel></div>
+          <div><Lbl>Amount (TZS)</Lbl><Inp type="number" value={editExpense.amount} onChange={e=>setEditExpense({...editExpense,amount:Number(e.target.value)})}/></div>
+          <div><Lbl>Date</Lbl><Inp type="date" value={editExpense.date} onChange={e=>setEditExpense({...editExpense,date:e.target.value})}/></div>
+          <div><Lbl>Description</Lbl><Inp value={editExpense.description||""} onChange={e=>setEditExpense({...editExpense,description:e.target.value})}/></div>
+        </div>
+        <div className="flex gap-2 mt-4 justify-between">
+          <Btn v="destructive" onClick={()=>{setConfirmDel({type:"expense",id:editExpense.id});setEditExpense(null);}}>🗑 Delete</Btn>
+          <div className="flex gap-2"><Btn v="outline" onClick={()=>setEditExpense(null)}>Cancel</Btn><Btn v="success" onClick={()=>saveEditExpense(editExpense)}>✅ Save Changes</Btn></div>
+        </div>
+      </Modal>}
+
+      {/* ── EDIT WINGA CREDIT MODAL ── */}
+      {editCredit&&<Modal open={!!editCredit} onClose={()=>setEditCredit(null)} title="Edit Winga Settlement">
+        <div className="grid grid-cols-2 gap-3">
+          <div><Lbl>Agent</Lbl>
+            <Sel value={String(editCredit.agentId)} onChange={v=>setEditCredit({...editCredit,agentId:Number(v)})}>
+              {agents.map(a=><option key={a.id} value={String(a.id)}>{a.name} — {a.area}</option>)}
+            </Sel>
+          </div>
+          <div><Lbl>Issue Date</Lbl><Inp type="date" value={editCredit.issueDate||today()} onChange={e=>setEditCredit({...editCredit,issueDate:e.target.value})}/></div>
+          <div><Lbl>Amount Paid (TZS)</Lbl><Inp type="number" value={editCredit.paidAmount||0} onChange={e=>setEditCredit({...editCredit,paidAmount:Number(e.target.value),status:Number(e.target.value)>0?"partial":"open"})}/></div>
+          <div><Lbl>Status</Lbl>
+            <Sel value={editCredit.status} onChange={v=>setEditCredit({...editCredit,status:v})}>
+              <option value="open">Open</option><option value="partial">Partial</option><option value="settled">Settled</option>
+            </Sel>
+          </div>
+          <div className="col-span-2"><Lbl>Notes</Lbl><Txta value={editCredit.notes||""} onChange={e=>setEditCredit({...editCredit,notes:e.target.value})}/></div>
+        </div>
+        {(()=>{const agent=agents.find(a=>a.id===editCredit.agentId);const totalDue=editCredit.items.reduce((s,item)=>{const p=products.find(x=>x.id===item.productId);return s+((p?.wholesalePrice||0)*item.qtySold);},0);const balance=totalDue-(editCredit.paidAmount||0);return <div className="mt-3 rounded-xl bg-slate-50 p-3 text-xs flex gap-5"><span>Total Due: <b>{cur(totalDue)}</b></span><span>Paid: <b className="text-emerald-700">{cur(editCredit.paidAmount||0)}</b></span><span>Balance: <b className={balance>0?"text-red-600":"text-emerald-700"}>{cur(balance)}</b></span></div>;})()}
+        <div className="flex gap-2 mt-4 justify-between">
+          <Btn v="destructive" onClick={()=>setBulkDelConfirm({label:"Delete this Winga settlement record?",action:()=>deleteCredit(editCredit.id)})}>🗑 Delete</Btn>
+          <div className="flex gap-2"><Btn v="outline" onClick={()=>setEditCredit(null)}>Cancel</Btn><Btn v="success" onClick={()=>saveEditCredit(editCredit)}>✅ Save Changes</Btn></div>
+        </div>
+      </Modal>}
+
+      {/* ── BULK DELETE CONFIRM ── */}
+      <Modal open={!!bulkDelConfirm} onClose={()=>setBulkDelConfirm(null)} title="⚠️ Confirm Bulk Delete">
+        <div className="rounded-2xl bg-red-50 border border-red-200 p-4 mb-4">
+          <p className="text-sm font-semibold text-red-700">{bulkDelConfirm?.label}</p>
+          <p className="text-xs text-red-500 mt-1">This action is permanent and cannot be undone!</p>
+        </div>
+        <p className="text-xs text-slate-500 mb-4">Make sure you have exported a backup before proceeding.</p>
+        <div className="flex gap-3 justify-end">
+          <Btn v="outline" onClick={()=>setBulkDelConfirm(null)}>Cancel</Btn>
+          <Btn v="destructive" onClick={()=>{bulkDelConfirm?.action();setBulkDelConfirm(null);}}>Yes, Delete Permanently</Btn>
+        </div>
+      </Modal>
+
       {/* Delete confirm */}
       <Modal open={!!confirmDel} onClose={()=>setConfirmDel(null)} title="Confirm Delete">
         <p className="text-sm text-slate-600 mb-5">Delete this {confirmDel?.type}? This cannot be undone.</p>
         <div className="flex gap-3 justify-end">
           <Btn v="outline" onClick={()=>setConfirmDel(null)}>Cancel</Btn>
-          <Btn v="destructive" onClick={()=>{if(confirmDel?.type==="product")delProduct(confirmDel.id);if(confirmDel?.type==="expense")delExpense(confirmDel.id);setConfirmDel(null);}}>Delete</Btn>
+          <Btn v="destructive" onClick={async()=>{
+            if(confirmDel?.type==="product")await delProduct(confirmDel.id);
+            if(confirmDel?.type==="expense")await delExpense(confirmDel.id);
+            if(confirmDel?.type==="sale")await deleteSale(confirmDel.id);
+            if(confirmDel?.type==="credit")await deleteCredit(confirmDel.id);
+            setConfirmDel(null);
+          }}>Delete</Btn>
         </div>
       </Modal>
     </div>

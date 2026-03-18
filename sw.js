@@ -1,7 +1,7 @@
 // STAR TRONICS — Service Worker
 // Caches the app shell for offline use
 
-const CACHE_NAME = 'star-tronics-v3';
+const CACHE_NAME = 'star-tronics-v5';
 
 const ASSETS_TO_CACHE = [
   '/star-tronics/',
