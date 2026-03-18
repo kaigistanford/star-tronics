@@ -122,7 +122,7 @@ async function getStorageEst() {
 // GOOGLE DRIVE ENGINE
 // ═══════════════════════════════════════════════════════════════
 const GOOGLE_CLIENT_ID = '1061622138956-sbvc4e7erg62dv4adpbj52sag0sj6fd2.apps.googleusercontent.com';
-const GOOGLE_SCOPES = 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email';
+const GOOGLE_SCOPES = 'https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email';
 const DRIVE_FILE_NAME = 'star_tronics_data.json';
 const DRIVE_API = 'https://www.googleapis.com/drive/v3';
 const DRIVE_UPLOAD = 'https://www.googleapis.com/upload/drive/v3';
@@ -162,7 +162,7 @@ async function gdriveGetUserInfo(token) {
 
 async function gdriveFindFile(token) {
   const q = encodeURIComponent(`name='${DRIVE_FILE_NAME}' and trashed=false`);
-  const data = await gdriveRequest(`${DRIVE_API}/files?q=${q}&spaces=drive&fields=files(id,name,modifiedTime)`, {}, token);
+  const data = await gdriveRequest(`${DRIVE_API}/files?q=${q}&spaces=appDataFolder&fields=files(id,name,modifiedTime)`, {}, token);
   return data.files?.[0] || null;
 }
 
@@ -172,7 +172,11 @@ async function gdriveLoadFile(token, fileId) {
 
 async function gdriveSaveFile(token, data, fileId) {
   const content = JSON.stringify({ ...data, _savedAt: new Date().toISOString() });
-  const metadata = JSON.stringify({ name: DRIVE_FILE_NAME, mimeType: 'application/json' });
+  const metadata = JSON.stringify({
+    name: DRIVE_FILE_NAME,
+    mimeType: 'application/json',
+    ...(!fileId && { parents: ['appDataFolder'] })
+  });
   const boundary = 'st_boundary_779';
   const body = `--${boundary}\r\nContent-Type: application/json\r\n\r\n${metadata}\r\n--${boundary}\r\nContent-Type: application/json\r\n\r\n${content}\r\n--${boundary}--`;
   const url = fileId
@@ -741,11 +745,12 @@ function App() {
   const [settingsEdit,setSettingsEdit]=useState(null);
   // historical entry state
   const [histSalesDate,setHistSalesDate]=useState(today());
-  const [histSalesLines,setHistSalesLines]=useState([{productId:"",qty:1,sellingType:"retail",paymentMode:"cash",customerId:""}]);
+  const [histSalesLines,setHistSalesLines]=useState([{productId:"",qty:1,sellingType:"retail",paymentMode:"cash",customerId:"",soldPrice:""}]);
   const [histStockDate,setHistStockDate]=useState(today());
   const [histStockLines,setHistStockLines]=useState([{productId:"",qty:"",costPerUnit:"",notes:""}]);
   const [histSubTab,setHistSubTab]=useState("sales");
   const [histViewDate,setHistViewDate]=useState("");
+  const [histSelCategory,setHistSelCategory]=useState(CATEGORIES[0]);
   // forms
   const [pForm,setPForm]=useState({name:"",category:CATEGORIES[0],retailPrice:"",wholesalePrice:"",costPrice:"",stock:"",reorderLevel:""});
   const [sForm,setSForm]=useState({productId:"",qty:1,sellingType:"retail",paymentMode:"cash",customerType:"walk-in",customerId:""});
@@ -787,6 +792,9 @@ function App() {
     setSales(s.length?s:SEED_SALES);setCredits(c.length?c:SEED_CREDITS);setCustomers(cu.length?cu:SEED_CUSTOMERS);
     setExpenses(ex.length?ex:SEED_EXPENSES);setPurchases(pu.length?pu:SEED_PURCHASES);
     if(st[0])setSettings(st[0]);
+    // Init category grid
+    const initProds=(p.length?p:SEED_PRODUCTS).filter(x=>x.category===CATEGORIES[0]);
+    setHistSalesLines(initProds.map(x=>({productId:String(x.id),qty:"",soldPrice:"",sellingType:"retail",paymentMode:"cash",customerId:""})));
     return true;
   }
 
@@ -811,8 +819,30 @@ function App() {
   function scheduleSync(){
     clearTimeout(syncTimerRef.current);
     setSyncStatus("pending");
-    syncTimerRef.current=setTimeout(async()=>{await doSync();},4000);
+    syncTimerRef.current=setTimeout(async()=>{await doSync();},1500);
   }
+
+  // ── Pull latest from Drive when tab becomes visible ──────────
+  useEffect(()=>{
+    const onVisible=async()=>{
+      if(document.visibilityState==="visible"&&tokenRef.current&&fileIdRef.current){
+        try{
+          const driveData=await gdriveLoadFile(tokenRef.current,fileIdRef.current);
+          if(driveData&&driveData._savedAt){
+            const driveSaved=new Date(driveData._savedAt);
+            const localSaved=lastSynced?new Date(lastSynced):new Date(0);
+            if(driveSaved>localSaved){
+              await applyDriveData(driveData);
+              setLastSynced(driveSaved);
+              setSyncStatus("synced");
+            }
+          }
+        }catch(e){}
+      }
+    };
+    document.addEventListener("visibilitychange",onVisible);
+    return ()=>document.removeEventListener("visibilitychange",onVisible);
+  },[lastSynced]);
 
   // ── On every data change → schedule a Drive sync ─────────────
   useEffect(()=>{
@@ -877,8 +907,9 @@ function App() {
     const product=products.find(p=>p.id===sale.productId);
     const user=users.find(u=>u.id===sale.soldBy);
     const customer=customers.find(c=>c.id===sale.customerId);
-    const unitPrice=getPrice(product||{},sale.sellingType);
-    return{...sale,productName:product?.name||"Unknown",category:product?.category||"",staffName:user?.name||"Unknown",customerName:customer?.name||null,unitPrice,total:unitPrice*sale.qty,costPrice:product?.costPrice||0};
+    const standardPrice=getPrice(product||{},sale.sellingType);
+    const unitPrice=sale.soldPrice&&Number(sale.soldPrice)>0?Number(sale.soldPrice):standardPrice;
+    return{...sale,productName:product?.name||"Unknown",category:product?.category||"",staffName:user?.name||"Unknown",customerName:customer?.name||null,unitPrice,standardPrice,total:unitPrice*sale.qty,costPrice:product?.costPrice||0};
   }),[sales,products,users,customers]);
 
   const now=new Date();
@@ -1041,6 +1072,7 @@ function App() {
       const prod=products.find(p=>p.id===pid);
       if(!prod)continue;
       if(prod.stock<qty)return notify(`Insufficient stock for "${prod.name}" — add historical stock first`,"err");
+      const soldPrice=line.soldPrice&&Number(line.soldPrice)>0?Number(line.soldPrice):null;
       const sale={
         id:Date.now()+Math.random(),
         productId:pid,qty,
@@ -1051,17 +1083,22 @@ function App() {
         createdAt:histSalesDate+"T12:00:00.000Z",
         customerType:line.sellingType==="wholesale"?"reseller":"walk-in",
         isHistorical:true,
+        ...(soldPrice&&{soldPrice}),
       };
       await dbPut("sales",sale);
       saved.push(sale);
       await upStock(pid,prod.stock-qty);
       if(line.paymentMode==="credit"&&line.customerId){
         const cust=customers.find(c=>c.id===Number(line.customerId));
-        if(cust){const price=getPrice(prod,line.sellingType);const u={...cust,creditBalance:(cust.creditBalance||0)+price*qty};await dbPut("customers",u);setCustomers(prev=>prev.map(c=>c.id===u.id?u:c));}
+        if(cust){
+          const price=soldPrice||getPrice(prod,line.sellingType);
+          const u={...cust,creditBalance:(cust.creditBalance||0)+price*qty};
+          await dbPut("customers",u);setCustomers(prev=>prev.map(c=>c.id===u.id?u:c));
+        }
       }
     }
     setSales(prev=>[...saved,...prev]);
-    setHistSalesLines([{productId:"",qty:1,sellingType:"retail",paymentMode:"cash",customerId:""}]);
+    setHistSalesLines([{productId:"",qty:1,sellingType:"retail",paymentMode:"cash",customerId:"",soldPrice:""}]);
     notify(`✅ ${saved.length} historical sale(s) recorded for ${histSalesDate}`);
     refreshEst();
   }
@@ -1616,104 +1653,227 @@ function App() {
 
           {/* ── Past Sales Entry ── */}
           {histSubTab==="sales"&&<div className="space-y-4">
+
+            {/* Controls bar */}
             <Card>
-              <CH>
-                <div className="flex items-center justify-between flex-wrap gap-2">
+              <CC cls="py-3">
+                <div className="flex flex-wrap items-end gap-3">
                   <div>
-                    <CT>Record Past Sales — Batch Entry</CT>
-                    <p className="text-xs text-slate-400 mt-0.5">Select a date, then add all items sold on that day. You can add as many rows as needed.</p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Lbl>Date of sales:</Lbl>
+                    <Lbl>Date of Sales</Lbl>
                     <Inp type="date" cls="w-40" value={histSalesDate} max={today()} onChange={e=>setHistSalesDate(e.target.value)}/>
                   </div>
-                </div>
-              </CH>
-              <CC>
-                {/* Header row */}
-                <div className="grid grid-cols-12 gap-2 mb-2 text-xs font-semibold text-slate-500 px-1">
-                  <div className="col-span-4">Product</div>
-                  <div className="col-span-1">Qty</div>
-                  <div className="col-span-2">Type</div>
-                  <div className="col-span-2">Payment</div>
-                  <div className="col-span-2">Customer</div>
-                  <div className="col-span-1"></div>
-                </div>
-                <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
-                  {histSalesLines.map((line,i)=>{
-                    const prod=products.find(p=>p.id===Number(line.productId));
-                    const price=prod?getPrice(prod,line.sellingType):0;
-                    return (
-                      <div key={i} className={cn("grid grid-cols-12 gap-2 items-center rounded-2xl p-2 border",i%2===0?"bg-slate-50":"bg-white")}>
-                        <div className="col-span-4">
-                          <Sel value={String(line.productId)} onChange={v=>updHistSalesLine(i,"productId",v)} ph="— select —">
-                            {products.map(p=><option key={p.id} value={String(p.id)}>{p.name}</option>)}
-                          </Sel>
-                          {prod&&<p className="text-xs text-slate-400 mt-0.5 pl-1">Stock: {prod.stock} · {cur(price)} ea</p>}
-                        </div>
-                        <div className="col-span-1">
-                          <Inp type="number" min="1" value={line.qty} onChange={e=>updHistSalesLine(i,"qty",e.target.value)}/>
-                        </div>
-                        <div className="col-span-2">
-                          <Sel value={line.sellingType} onChange={v=>updHistSalesLine(i,"sellingType",v)}>
-                            <option value="retail">Retail</option>
-                            <option value="wholesale">Wholesale</option>
-                          </Sel>
-                        </div>
-                        <div className="col-span-2">
-                          <Sel value={line.paymentMode} onChange={v=>updHistSalesLine(i,"paymentMode",v)}>
-                            <option value="cash">Cash</option>
-                            <option value="transfer">Transfer</option>
-                            <option value="credit">Credit</option>
-                          </Sel>
-                        </div>
-                        <div className="col-span-2">
-                          <Sel value={String(line.customerId)} onChange={v=>updHistSalesLine(i,"customerId",v)} ph="Walk-in">
-                            {customers.map(c=><option key={c.id} value={String(c.id)}>{c.name}</option>)}
-                          </Sel>
-                        </div>
-                        <div className="col-span-1 flex justify-center">
-                          {histSalesLines.length>1&&<button onClick={()=>removeHistSalesLine(i)} className="text-red-400 hover:text-red-600 text-lg font-bold leading-none">×</button>}
-                        </div>
-                        {/* inline total */}
-                        {prod&&Number(line.qty)>0&&<div className="col-span-12 ml-1 text-xs text-indigo-600 font-medium">
-                          → Total: {cur(price*Number(line.qty))} · Profit: {cur((price-(prod.costPrice||0))*Number(line.qty))}
-                        </div>}
-                      </div>
-                    );
-                  })}
-                </div>
-
-                {/* Summary row */}
-                {histSalesLines.some(l=>l.productId&&Number(l.qty)>0)&&(()=>{
-                  const tot=histSalesLines.reduce((s,l)=>{const p=products.find(x=>x.id===Number(l.productId));const price=p?getPrice(p,l.sellingType):0;return s+price*Number(l.qty||0);},0);
-                  const prof=histSalesLines.reduce((s,l)=>{const p=products.find(x=>x.id===Number(l.productId));const price=p?getPrice(p,l.sellingType):0;return s+(price-(p?.costPrice||0))*Number(l.qty||0);},0);
-                  return <div className="mt-3 rounded-xl bg-indigo-50 border border-indigo-100 px-4 py-2 flex gap-6 text-xs">
-                    <span className="text-slate-500">Date: <b className="text-slate-800">{histSalesDate}</b></span>
-                    <span className="text-slate-500">Items: <b className="text-slate-800">{histSalesLines.filter(l=>l.productId&&Number(l.qty)>0).length}</b></span>
-                    <span className="text-slate-500">Total: <b className="text-indigo-700">{cur(tot)}</b></span>
-                    <span className="text-slate-500">Profit: <b className="text-emerald-700">{cur(prof)}</b></span>
-                  </div>;
-                })()}
-
-                <div className="flex gap-2 mt-3 flex-wrap">
-                  <Btn v="outline" onClick={addHistSalesLine}>➕ Add Row</Btn>
-                  <Btn onClick={saveHistoricalSales} cls="bg-indigo-600 text-white hover:bg-indigo-700">💾 Save All Sales for {histSalesDate}</Btn>
-                  <Btn v="ghost" onClick={()=>setHistSalesLines([{productId:"",qty:1,sellingType:"retail",paymentMode:"cash",customerId:""}])}>🗑 Clear All</Btn>
+                  <div>
+                    <Lbl>Category</Lbl>
+                    <Sel value={histSelCategory==="all"?CATEGORIES[0]:histSelCategory}
+                      onChange={v=>{ setHistSelCategory(v); setHistSalesLines(
+                        products.filter(p=>p.category===v).map(p=>({
+                          productId:String(p.id),qty:"",soldPrice:"",
+                          sellingType:"retail",paymentMode:"cash",customerId:""
+                        }))
+                      );}} cls="w-48">
+                      {CATEGORIES.map(c=><option key={c} value={c}>{c}</option>)}
+                    </Sel>
+                  </div>
+                  <div className="text-xs text-slate-400 pb-1">
+                    {histSelCategory&&histSelCategory!=="all"&&
+                      <span>{products.filter(p=>p.category===histSelCategory).length} products in this category</span>}
+                  </div>
                 </div>
               </CC>
             </Card>
 
-            {/* Quick help tip */}
-            <div className="rounded-2xl bg-amber-50 border border-amber-100 p-4">
-              <p className="text-xs font-semibold text-amber-700 mb-1">💡 How to use Past Sales Entry</p>
-              <ul className="text-xs text-amber-700 space-y-1 list-disc list-inside">
-                <li>Select the date when the sales happened (can be months ago)</li>
-                <li>Add one row per item sold on that day</li>
-                <li>If stock runs out, first add opening stock on the <b>Opening Stock</b> tab for an earlier date</li>
-                <li>All recorded sales will appear correctly in Reports by date</li>
-                <li>You can come back and add more sales for any other past date</li>
-              </ul>
+            {/* Category product grid */}
+            {(()=>{
+              const catProds=products.filter(p=>p.category===(histSelCategory==="all"?CATEGORIES[0]:histSelCategory));
+              const lines=histSalesLines.filter(l=>catProds.some(p=>String(p.id)===l.productId));
+              if(!catProds.length) return <p className="text-xs text-slate-400">No products in this category.</p>;
+
+              const anyFilled=lines.some(l=>l.qty&&Number(l.qty)>0);
+              const batchPayment=lines[0]?.paymentMode||"cash";
+
+              return (
+                <Card>
+                  <CH>
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <div>
+                        <CT>📦 {histSelCategory==="all"?CATEGORIES[0]:histSelCategory}</CT>
+                        <p className="text-xs text-slate-400 mt-0.5">Fill in Qty and Sold Price for items that were sold. Leave Qty empty to skip.</p>
+                      </div>
+                      {/* Batch payment setter */}
+                      <div className="flex items-center gap-2 rounded-xl bg-slate-50 px-3 py-2">
+                        <span className="text-xs text-slate-500">Set all payment to:</span>
+                        {["cash","transfer","credit"].map(pm=>(
+                          <button key={pm} onClick={()=>setHistSalesLines(prev=>prev.map(l=>({...l,paymentMode:pm})))}
+                            className={cn("rounded-lg px-2 py-1 text-xs font-medium capitalize transition",
+                              lines[0]?.paymentMode===pm?"bg-slate-900 text-white":"bg-white border text-slate-500 hover:bg-slate-100")}>
+                            {pm}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </CH>
+                  <CC>
+                    {/* Table header */}
+                    <div className="grid grid-cols-12 gap-2 mb-2 text-xs font-semibold text-slate-400 px-2 border-b pb-2">
+                      <div className="col-span-4">Product</div>
+                      <div className="col-span-2 text-center">Standard Price</div>
+                      <div className="col-span-2 text-center">Sold Price <span className="text-amber-500 font-normal">(actual)</span></div>
+                      <div className="col-span-1 text-center">Qty</div>
+                      <div className="col-span-1 text-center">Type</div>
+                      <div className="col-span-1 text-center">Payment</div>
+                      <div className="col-span-1 text-center">Total</div>
+                    </div>
+
+                    {/* One row per product in category */}
+                    <div className="space-y-1">
+                      {catProds.map((prod)=>{
+                        const lineIdx=histSalesLines.findIndex(l=>l.productId===String(prod.id));
+                        const line=histSalesLines[lineIdx]||{qty:"",soldPrice:"",sellingType:"retail",paymentMode:"cash",customerId:""};
+                        const stdPrice=getPrice(prod,line.sellingType||"retail");
+                        const soldP=line.soldPrice&&Number(line.soldPrice)>0?Number(line.soldPrice):stdPrice;
+                        const qty=Number(line.qty)||0;
+                        const total=soldP*qty;
+                        const profit=(soldP-(prod.costPrice||0))*qty;
+                        const isBargained=line.soldPrice&&Number(line.soldPrice)>0&&Number(line.soldPrice)!==stdPrice;
+                        const hasSale=qty>0;
+
+                        const upd=(field,val)=>setHistSalesLines(prev=>{
+                          const copy=[...prev];
+                          const idx=copy.findIndex(l=>l.productId===String(prod.id));
+                          if(idx>=0) copy[idx]={...copy[idx],[field]:val};
+                          return copy;
+                        });
+
+                        return (
+                          <div key={prod.id} className={cn(
+                            "grid grid-cols-12 gap-2 items-center rounded-xl px-2 py-1.5 transition",
+                            hasSale?(isBargained?"bg-amber-50 border border-amber-200":"bg-emerald-50 border border-emerald-100"):"hover:bg-slate-50"
+                          )}>
+                            {/* Product name */}
+                            <div className="col-span-4">
+                              <p className={cn("text-xs font-medium",hasSale?"text-slate-800":"text-slate-500")}>{prod.name}</p>
+                              <p className="text-xs text-slate-400">Stock: {prod.stock} · Cost: {cur(prod.costPrice)}</p>
+                            </div>
+                            {/* Standard price */}
+                            <div className="col-span-2 text-center">
+                              <div className="text-xs text-slate-400 font-medium">{cur(stdPrice)}</div>
+                              <div className="flex justify-center gap-1 mt-0.5">
+                                <button onClick={()=>upd("sellingType","retail")}
+                                  className={cn("text-xs px-1.5 py-0.5 rounded transition",(line.sellingType||"retail")==="retail"?"bg-slate-800 text-white":"text-slate-400 hover:bg-slate-100")}>R</button>
+                                <button onClick={()=>upd("sellingType","wholesale")}
+                                  className={cn("text-xs px-1.5 py-0.5 rounded transition",line.sellingType==="wholesale"?"bg-slate-800 text-white":"text-slate-400 hover:bg-slate-100")}>W</button>
+                              </div>
+                            </div>
+                            {/* Sold price */}
+                            <div className="col-span-2">
+                              <Inp type="number" value={line.soldPrice||""}
+                                placeholder={String(stdPrice)}
+                                onChange={e=>upd("soldPrice",e.target.value)}
+                                cls={cn("text-center text-xs",isBargained?"border-amber-300 bg-amber-50 font-semibold":"")}/>
+                              {isBargained&&<p className="text-xs text-amber-600 text-center">-{cur(stdPrice-Number(line.soldPrice))} disc.</p>}
+                            </div>
+                            {/* Qty */}
+                            <div className="col-span-1">
+                              <Inp type="number" min="0" value={line.qty||""}
+                                placeholder="0"
+                                onChange={e=>upd("qty",e.target.value)}
+                                cls={cn("text-center text-xs font-bold",hasSale?"border-emerald-400":"")}/>
+                            </div>
+                            {/* Type (R/W toggle already above) */}
+                            <div className="col-span-1 text-center">
+                              <span className={cn("text-xs px-1.5 py-0.5 rounded-full font-medium",
+                                (line.sellingType||"retail")==="retail"?"bg-slate-200 text-slate-600":"bg-indigo-100 text-indigo-700")}>
+                                {(line.sellingType||"retail")==="retail"?"Retail":"W/sale"}
+                              </span>
+                            </div>
+                            {/* Payment */}
+                            <div className="col-span-1">
+                              <Sel value={line.paymentMode||"cash"} onChange={v=>upd("paymentMode",v)} cls="text-xs p-1">
+                                <option value="cash">Cash</option>
+                                <option value="transfer">Transfer</option>
+                                <option value="credit">Credit</option>
+                              </Sel>
+                            </div>
+                            {/* Total */}
+                            <div className="col-span-1 text-right">
+                              {hasSale?(
+                                <div>
+                                  <p className="text-xs font-bold text-slate-800">{cur(total)}</p>
+                                  <p className={cn("text-xs",profit>=0?"text-emerald-600":"text-red-500")}>P:{cur(profit)}</p>
+                                </div>
+                              ):<span className="text-xs text-slate-300">—</span>}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Category summary */}
+                    {anyFilled&&(()=>{
+                      const filledLines=histSalesLines.filter(l=>catProds.some(p=>String(p.id)===l.productId)&&Number(l.qty)>0);
+                      const totRev=filledLines.reduce((s,l)=>{
+                        const p=products.find(x=>String(x.id)===l.productId);
+                        const std=p?getPrice(p,l.sellingType||"retail"):0;
+                        const sp=l.soldPrice&&Number(l.soldPrice)>0?Number(l.soldPrice):std;
+                        return s+sp*Number(l.qty);
+                      },0);
+                      const totProfit=filledLines.reduce((s,l)=>{
+                        const p=products.find(x=>String(x.id)===l.productId);
+                        const std=p?getPrice(p,l.sellingType||"retail"):0;
+                        const sp=l.soldPrice&&Number(l.soldPrice)>0?Number(l.soldPrice):std;
+                        return s+(sp-(p?.costPrice||0))*Number(l.qty);
+                      },0);
+                      const totDisc=filledLines.reduce((s,l)=>{
+                        const p=products.find(x=>String(x.id)===l.productId);
+                        const std=p?getPrice(p,l.sellingType||"retail"):0;
+                        const sp=l.soldPrice&&Number(l.soldPrice)>0?Number(l.soldPrice):std;
+                        return s+(std>sp?(std-sp)*Number(l.qty):0);
+                      },0);
+                      return <div className="mt-3 rounded-xl bg-indigo-50 border border-indigo-100 px-4 py-2.5 flex flex-wrap gap-4 text-xs">
+                        <span>📅 <b>{histSalesDate}</b></span>
+                        <span>Items sold: <b>{filledLines.length}</b></span>
+                        <span>Revenue: <b className="text-indigo-700">{cur(totRev)}</b></span>
+                        <span>Profit: <b className={totProfit>=0?"text-emerald-700":"text-red-600"}>{cur(totProfit)}</b></span>
+                        {totDisc>0&&<span className="text-amber-600">Discounts: <b>{cur(totDisc)}</b></span>}
+                      </div>;
+                    })()}
+
+                    <div className="flex flex-wrap gap-2 mt-4">
+                      <Btn onClick={saveHistoricalSales} cls="bg-indigo-600 text-white hover:bg-indigo-700 text-sm px-5">
+                        💾 Save {(histSelCategory==="all"?CATEGORIES[0]:histSelCategory)} Sales for {histSalesDate}
+                      </Btn>
+                      <Btn v="ghost" onClick={()=>setHistSalesLines(prev=>prev.map(l=>({...l,qty:"",soldPrice:""})))}>
+                        🗑 Clear Quantities
+                      </Btn>
+                    </div>
+                  </CC>
+                </Card>
+              );
+            })()}
+
+            {/* Tips */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="rounded-2xl bg-indigo-50 border border-indigo-100 p-4">
+                <p className="text-xs font-semibold text-indigo-700 mb-2">💡 How to use category-wise entry</p>
+                <ul className="text-xs text-indigo-700 space-y-1 list-disc list-inside">
+                  <li>Select a category (e.g. Chargers) — all products appear as rows</li>
+                  <li>Only fill in Qty for items that were actually sold</li>
+                  <li>Leave Qty empty = item was not sold that day</li>
+                  <li>Save, then switch to next category and repeat</li>
+                  <li>Use <b>Set all payment to</b> button to change all rows at once</li>
+                  <li>Toggle <b>R / W</b> button per row for retail or wholesale</li>
+                </ul>
+              </div>
+              <div className="rounded-2xl bg-amber-50 border border-amber-100 p-4">
+                <p className="text-xs font-semibold text-amber-700 mb-2">💡 How to record bargained prices</p>
+                <ul className="text-xs text-amber-700 space-y-1 list-disc list-inside">
+                  <li>The <b>Standard Price</b> column shows the normal price</li>
+                  <li>If the buyer bargained, type the actual sold price in <b>Sold Price</b></li>
+                  <li>Leave Sold Price empty to use the standard price automatically</li>
+                  <li>The row highlights amber when a custom price is set</li>
+                  <li>Discount and profit are calculated and shown automatically</li>
+                </ul>
+              </div>
             </div>
           </div>}
 
@@ -1864,7 +2024,7 @@ function App() {
                             <CC>
                               <Tbl>
                                 <thead><tr>
-                                  <Th>Product</Th><Th>Qty</Th><Th>Type</Th><Th>Payment</Th><Th>Customer</Th><Th>Total</Th><Th>Profit</Th>
+                                  <Th>Product</Th><Th>Qty</Th><Th>Type</Th><Th>Payment</Th><Th>Customer</Th><Th>Unit Price</Th><Th>Total</Th><Th>Profit</Th>
                                 </tr></thead>
                                 <tbody>
                                   {daySalesHist.map((s,idx)=>(
@@ -1874,6 +2034,15 @@ function App() {
                                       <Td cls="capitalize">{s.sellingType}</Td>
                                       <Td><Bdg cls={s.paymentMode==="credit"?"bg-red-100 text-red-700":s.paymentMode==="transfer"?"bg-blue-100 text-blue-700":"bg-emerald-100 text-emerald-700"}>{s.paymentMode}</Bdg></Td>
                                       <Td cls="text-slate-400">{s.customerName||"—"}</Td>
+                                      <Td>
+                                        {s.soldPrice&&Number(s.soldPrice)!==s.standardPrice?(
+                                          <div>
+                                            <span className="line-through text-slate-400 text-xs">{cur(s.standardPrice)}</span>
+                                            <span className="ml-1 text-amber-600 font-semibold">{cur(s.unitPrice)}</span>
+                                            <Bdg cls="ml-1 bg-amber-100 text-amber-700">bargained</Bdg>
+                                          </div>
+                                        ):<span>{cur(s.unitPrice)}</span>}
+                                      </Td>
                                       <Td cls="font-semibold">{cur(s.total)}</Td>
                                       <Td cls="text-emerald-600">{cur((s.unitPrice-(s.costPrice||0))*s.qty)}</Td>
                                     </tr>
